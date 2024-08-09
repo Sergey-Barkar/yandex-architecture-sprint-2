@@ -1,0 +1,153 @@
+name: mongo-sharding
+services:
+
+  # сервер конфигурации
+  mongo_configSrv:
+    image: mongo:latest 
+    container_name: mongo_configSrv
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_config-data:/data/db
+    command:
+      [
+        "--configsvr",
+        "--replSet",
+        "mongo_configSrv",
+        "--bind_ip_all",
+        "--port",
+        "27017"
+      ] 
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet" ]
+      interval: 5s
+      start_period: 0s
+
+  mongosetup:
+    image: mongo:latest 
+    depends_on:
+      - mongo_router
+    restart: "no"
+    entrypoint: 
+      [ 
+        "bash",
+        "-c",
+        "sleep 4 
+        && echo '27017'
+        && mongosh --host mongo_configSrv:27017 
+        --eval 'rs.initiate({_id : \"mongo_configSrv\", configsvr: true, members: [{ _id : 0, host : \"mongo_configSrv:27017\" }]});
+        exit();' 
+        && echo '27018'
+        && mongosh --host mongo_shard1:27018 
+        --eval 'rs.initiate({_id : \"mongo_shard1\", members: [{ _id : 0, host : \"mongo_shard1:27018\" }]});
+        exit();' 
+        && echo '27019'
+        && mongosh --host mongo_shard2:27019
+        --eval 'rs.initiate({_id : \"mongo_shard2\", members: [{ _id : 0, host : \"mongo_shard2:27019\" }]});
+        exit();' 
+        && sleep 4
+        && echo '27020'
+        && mongosh --host mongo_router:27020
+        --eval 'sh.addShard(\"mongo_shard1/mongo_shard1:27018\");
+        sh.addShard(\"mongo_shard2/mongo_shard2:27019\");
+        sh.enableSharding(\"somedb\");
+        sh.shardCollection(\"somedb.helloDoc\", { \"age\": \"hashed\" });
+        exit();'
+        && sleep 4
+        && echo '27020-2'
+        && mongosh \"mongo_router:27020/somedb\" --eval 'for(var i = 0; i < 1000; i++) db.helloDoc.insertOne({age:i, name:\"ly\"+i});
+        exit();'
+        && echo 'Success'"
+      ]
+
+
+  # 1-й шард 
+  mongo_shard1:
+    image: mongo:latest
+    container_name: mongo_shard1
+    restart: always
+    ports:
+      - "27018:27018"
+    volumes:
+      - mongo_shard1-data:/data/db
+    command:
+      [
+        "--shardsvr", 
+        "--replSet",
+        "mongo_shard1", 
+        "--bind_ip_all", 
+        "--port",
+        "27018"
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet" ]
+      interval: 5s
+      start_period: 0s
+
+  # 2-й шард 
+  mongo_shard2:
+    image: mongo:latest
+    container_name: mongo_shard2
+    restart: always
+    ports:
+      - "27019:27019"
+    volumes:
+      - mongo_shard2-data:/data/db
+    command:
+      [
+        "--shardsvr", 
+        "--replSet",
+        "mongo_shard2", 
+        "--bind_ip_all", 
+        "--port",
+        "27019"
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet" ]
+      interval: 5s
+      start_period: 0s
+  
+  # роутер
+  mongo_router:
+    image: mongo:latest
+    container_name: mongo_router
+    restart: always
+    ports:
+      - "27020:27020"
+    depends_on:
+      - mongo_configSrv
+      - mongo_shard1
+      - mongo_shard2
+    command:
+      [
+        "mongos", 
+        "--configdb", 
+        "mongo_configSrv/mongo_configSrv:27017",
+        "--bind_ip_all",
+        "--port",
+        "27020"
+      ]
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet" ]
+      interval: 5s
+      start_period: 0s
+      
+  pymongo_api:
+    container_name: pymongo_api
+    build: 
+      context: api_app
+      dockerfile: Dockerfile
+    image: kazhem/pymongo_api:1.0.0
+    depends_on:
+      - mongo_router
+    ports:
+      - 8080:8080
+    environment:
+      MONGODB_URL: "mongodb://mongo_router:27020"
+      MONGODB_DATABASE_NAME: "somedb"
+
+volumes:
+  mongo_config-data:
+  mongo_shard1-data:
+  mongo_shard2-data:
